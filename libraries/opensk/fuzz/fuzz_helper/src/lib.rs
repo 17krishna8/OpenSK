@@ -25,6 +25,7 @@ use opensk::ctap::hid::{
     ChannelID, CtapHidCommand, HidPacket, HidPacketIterator, Message, MessageAssembler,
 };
 use opensk::ctap::{Channel, CtapState, cbor_read};
+use opensk::env::Env as _;
 use opensk::env::test::TestEnv;
 use opensk::env::test::customization::TestCustomization;
 use opensk::{Ctap, Transport, test_helpers};
@@ -270,6 +271,52 @@ pub fn split_assemble_hid_packets(data: &[u8]) -> arbitrary::Result<()> {
                 assembler.parse_packet(&mut env, last_packet, None),
                 Ok(Some(message))
             );
+        }
+    }
+    Ok(())
+}
+
+// Interprets the raw data as a sequence of CTAP commands applied to the same persistent
+// authenticator state, with the clock advancing between commands. This exercises the
+// state machines spanning multiple commands (e.g. credential management enumeration,
+// large blob writing, PIN protocols, get next assertion) as well as timeout logic.
+//
+// The input layout is: [8 bytes seed][ (2 bytes clock advance, 1 byte length, length
+// bytes command) * ]. Each command includes the command byte and is processed through
+// the CTAP HID layer, like in process_ctap_any_type.
+pub fn process_ctap_stateful(data: &[u8]) -> arbitrary::Result<()> {
+    let mut unstructured = Unstructured::new(data);
+
+    let mut env = TestEnv::default();
+    env.seed_rng_from_u64(u64::arbitrary(&mut unstructured)?);
+
+    let data = unstructured.take_rest();
+    // Initialize ctap state and hid and get the allocated cid.
+    let mut ctap = Ctap::new(env);
+    let cid = initialize(&mut ctap);
+
+    let mut assembler_reply = MessageAssembler::default();
+    let mut i = 0;
+    while i + 2 < data.len() {
+        // Advance the clock to exercise the timeout handling (e.g. pinUvAuthToken
+        // timeouts, wink permission, or channel locks).
+        let elapsed_ms = usize::from(data[i]) * 71 + usize::from(data[i + 1]);
+        ctap.env().clock().advance(elapsed_ms);
+        let len = usize::from(data[i + 2]);
+        i += 3;
+        let end = (i + len).min(data.len());
+        // Wrap the command as a message with the allocated cid.
+        let mut command = cid.to_vec();
+        command.extend_from_slice(&data[i..end]);
+        i = end;
+        let message = raw_to_message(&command);
+        if let Some(hid_packet_iterator) = HidPacketIterator::new(message) {
+            for pkt_request in hid_packet_iterator {
+                for pkt_reply in ctap.process_hid_packet(&pkt_request, Transport::MainHid) {
+                    // Only checks for assembling crashes, not for semantics.
+                    let _ = assembler_reply.parse_packet(ctap.env(), &pkt_reply, None);
+                }
+            }
         }
     }
     Ok(())

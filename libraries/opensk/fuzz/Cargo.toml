@@ -69,3 +69,9 @@ name = "fuzz_target_split_assemble"
 path = "fuzz_targets/fuzz_target_split_assemble.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_target_process_ctap_stateful"
+path = "fuzz_targets/fuzz_target_process_ctap_stateful.rs"
+test = false
+doc = false
